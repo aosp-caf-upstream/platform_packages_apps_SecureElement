@@ -84,7 +84,11 @@ public class Terminal {
                         mAccessControlEnforcer.reset();
                     }
                 } else {
-                    initializeAccessControl();
+                    try {
+                        initializeAccessControl();
+                    } catch (Exception e) {
+                        // ignore
+                    }
                     synchronized (mLock) {
                         mDefaultApplicationSelectedOnBasicChannel = true;
                     }
@@ -136,10 +140,15 @@ public class Terminal {
         if (channel == null) {
             return;
         }
-        if (mIsConnected && !channel.isBasicChannel()) {
+        if (mIsConnected) {
             try {
                 byte status = mSEHal.closeChannel((byte) channel.getChannelNumber());
-                if (status != SecureElementStatus.SUCCESS) {
+                /* For Basic Channels, errors are expected.
+                 * Underlying implementations use this call as an indication when there
+                 * aren't any users actively using the channel, and the chip can go
+                 * into low power state.
+                 */
+                if (!channel.isBasicChannel() && status != SecureElementStatus.SUCCESS) {
                     Log.e(mTag, "Error closing channel " + channel.getChannelNumber());
                 }
             } catch (RemoteException e) {
@@ -240,7 +249,8 @@ public class Terminal {
      * Opens a Basic Channel with the given AID and P2 paramters
      */
     public Channel openBasicChannel(SecureElementSession session, byte[] aid, byte p2,
-            ISecureElementListener listener, String packageName, int pid) throws IOException {
+            ISecureElementListener listener, String packageName, int pid) throws IOException,
+            NoSuchElementException {
         if (aid != null && aid.length == 0) {
             aid = null;
         } else if (aid != null && (aid.length < 5 || aid.length > 16)) {
@@ -252,7 +262,7 @@ public class Terminal {
         Log.w(mTag, "Enable access control on basic channel for " + packageName);
         ChannelAccess channelAccess;
         try {
-            channelAccess = setUpChannelAccess(aid, packageName, true, pid);
+            channelAccess = setUpChannelAccess(aid, packageName, pid);
         } catch (MissingResourceException e) {
             return null;
         }
@@ -292,8 +302,7 @@ public class Terminal {
             } else if (status[0] == SecureElementStatus.IOERROR) {
                 throw new IOException("OpenBasicChannel() failed");
             } else if (status[0] == SecureElementStatus.NO_SUCH_ELEMENT_ERROR) {
-                throw new ServiceSpecificException(SEService.NO_SUCH_ELEMENT_ERROR,
-                        "OpenBasicChannel() failed");
+                throw new NoSuchElementException("OpenBasicChannel() failed");
             }
 
             Channel basicChannel = new Channel(session, this, 0, selectResponse,
@@ -318,7 +327,8 @@ public class Terminal {
     /**
      * Opens a logical Channel without Channel Access initialization.
      */
-    public Channel openLogicalChannelWithoutChannelAccess(byte[] aid) throws IOException {
+    public Channel openLogicalChannelWithoutChannelAccess(byte[] aid) throws IOException,
+            NoSuchElementException {
         return openLogicalChannel(null, aid, (byte) 0x00, null, null, 0);
     }
 
@@ -326,7 +336,8 @@ public class Terminal {
      * Opens a logical Channel with AID.
      */
     public Channel openLogicalChannel(SecureElementSession session, byte[] aid, byte p2,
-            ISecureElementListener listener, String packageName, int pid) throws IOException {
+            ISecureElementListener listener, String packageName, int pid) throws IOException,
+            NoSuchElementException {
         if (aid != null && aid.length == 0) {
             aid = null;
         } else if (aid != null && (aid.length < 5 || aid.length > 16)) {
@@ -339,7 +350,7 @@ public class Terminal {
         if (packageName != null) {
             Log.w(mTag, "Enable access control on logical channel for " + packageName);
             try {
-                channelAccess = setUpChannelAccess(aid, packageName, true, pid);
+                channelAccess = setUpChannelAccess(aid, packageName, pid);
             } catch (MissingResourceException e) {
                 return null;
             }
@@ -370,8 +381,7 @@ public class Terminal {
             } else if (status[0] == SecureElementStatus.IOERROR) {
                 throw new IOException("OpenLogicalChannel() failed");
             } else if (status[0] == SecureElementStatus.NO_SUCH_ELEMENT_ERROR) {
-                throw new ServiceSpecificException(SEService.NO_SUCH_ELEMENT_ERROR,
-                        "OpenLogicalChannel() failed");
+                throw new NoSuchElementException("OpenLogicalChannel() failed");
             }
             if (responseArray[0].channelNumber <= 0 || status[0] != SecureElementStatus.SUCCESS) {
                 return null;
@@ -487,14 +497,19 @@ public class Terminal {
     /**
      * Checks if the application is authorized to receive the transaction event.
      */
-    public boolean[] isNfcEventAllowed(
-            PackageManager packageManager,
-            byte[] aid,
-            String[] packageNames,
-            boolean checkRefreshTag) {
+    public boolean[] isNfcEventAllowed(PackageManager packageManager, byte[] aid,
+            String[] packageNames) {
+        boolean checkRefreshTag = true;
         if (mAccessControlEnforcer == null) {
-            Log.e(mTag, "Access Control Enforcer not properly set up");
-            initializeAccessControl();
+            try {
+                initializeAccessControl();
+                // Just finished to initialize the access control enforcer.
+                // It is too much to check the refresh tag in this case.
+                checkRefreshTag = false;
+            } catch (Exception e) {
+                Log.i(mTag, "isNfcEventAllowed Exception: " + e.getMessage());
+                return null;
+            }
         }
         mAccessControlEnforcer.setPackageManager(packageManager);
 
@@ -524,11 +539,14 @@ public class Terminal {
     /**
      * Initialize the Access Control and set up the channel access.
      */
-    private ChannelAccess setUpChannelAccess(byte[] aid, String packageName,
-            boolean checkRefreshTag, int pid) throws IOException {
+    private ChannelAccess setUpChannelAccess(byte[] aid, String packageName, int pid)
+            throws IOException, MissingResourceException {
+        boolean checkRefreshTag = true;
         if (mAccessControlEnforcer == null) {
-            Log.e(mTag, "Access Control Enforcer not properly set up");
             initializeAccessControl();
+            // Just finished to initialize the access control enforcer.
+            // It is too much to check the refresh tag in this case.
+            checkRefreshTag = false;
         }
         mAccessControlEnforcer.setPackageManager(mContext.getPackageManager());
 
@@ -539,9 +557,7 @@ public class Terminal {
                                 checkRefreshTag);
                 channelAccess.setCallingPid(pid);
                 return channelAccess;
-            } catch (IOException e) {
-                throw e;
-            } catch (MissingResourceException e) {
+            } catch (IOException | MissingResourceException e) {
                 throw e;
             } catch (Exception e) {
                 throw new SecurityException("Exception in setUpChannelAccess()" + e);
@@ -552,12 +568,22 @@ public class Terminal {
     /**
      * Initializes the Access Control for this Terminal
      */
-    private synchronized void initializeAccessControl() {
+    private synchronized void initializeAccessControl() throws IOException,
+            MissingResourceException {
         synchronized (mLock) {
             if (mAccessControlEnforcer == null) {
                 mAccessControlEnforcer = new AccessControlEnforcer(this);
             }
-            mAccessControlEnforcer.initialize(true);
+            try {
+                mAccessControlEnforcer.initialize();
+            } catch (IOException | MissingResourceException e) {
+                // Retrieving access rules failed because of an IO error happened between
+                // the terminal and the secure element or the lack of a logical channel available.
+                // It might be a temporary failure, so the terminal shall attempt to cache
+                // the access rules again later.
+                mAccessControlEnforcer = null;
+                throw e;
+            }
         }
     }
 
