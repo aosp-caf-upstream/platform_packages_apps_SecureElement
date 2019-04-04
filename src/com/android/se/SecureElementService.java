@@ -49,6 +49,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.NoSuchElementException;
+import android.telephony.TelephonyManager;
 
 /**
  * Underlying implementation for OMAPI SEService
@@ -150,9 +151,17 @@ public final class SecureElementService extends Service {
 
     private void addTerminals(String terminalName) {
         int index = 1;
+        int uicc_count = 0;
         String name = null;
+        TelephonyManager mTelephonyManager;
+
+        mTelephonyManager = (TelephonyManager) getSystemService(Context.TELEPHONY_SERVICE);
+        uicc_count = mTelephonyManager.getPhoneCount();
         try {
             do {
+                if((terminalName.equals(UICC_TERMINAL)) && (index > uicc_count)) {
+                  break;
+                }
                 name = terminalName + Integer.toString(index);
                 Terminal terminal = new Terminal(name, this);
                 terminal.initialize();
